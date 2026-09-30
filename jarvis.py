@@ -1,20 +1,20 @@
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import gradio as gr
 import tiktoken
 import time
+import os
 
 # =====================================================================
 # 1. HYPERPARAMETERS & SYSTEM HARDWARE SETUP
 # =====================================================================
 batch_size = 16      # Parallel text sequence streams processed simultaneously
 block_size = 128     # Maximum context window length (token sequence history)
-max_iters = 1200     # Gradient optimization steps
-eval_interval = 200  # Intervals at which validation performance is checked
+max_iters = 200      # Lowered for fast initialization on Render's CPU tiers
+eval_interval = 50   # Intervals at which validation performance is checked
 learning_rate = 5e-4
-eval_iters = 100
+eval_iters = 20
 n_embd = 192         # Neural abstraction embedding dimension size
 n_head = 6           # Concurrent Multi-Head Attention blocks
 n_layer = 4          # Number of sequential Transformer blocks stacked
@@ -33,7 +33,6 @@ print(f"🚀 Initializing system. Launching custom model architecture on: {devic
 # =====================================================================
 # 2. TOY DATASET & SUB-WORD TOKENIZER ENGINE
 # =====================================================================
-# Training text data used to teach our network conversational paradigms
 training_data = """
 User: Hello JARVIS.
 JARVIS: Welcome back, Sir. All systems are fully operational. How can I assist you today?
@@ -92,7 +91,6 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        # Create an explicit look-back tracking matrix mask lower-triangle block
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         self.dropout = nn.Dropout(dropout)
 
@@ -101,9 +99,7 @@ class Head(nn.Module):
         k = self.key(x)
         q = self.query(x)
 
-        # Calculate dot-product relationship attention scores scaled by dimension roots
         wei = q @ k.transpose(-2, -1) * (k.shape[-1]**-0.5)
-        # Causal mask filtering intercepts token projection from reading information out of order
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
@@ -150,7 +146,6 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        # Adding residual connections scales gradient flow safety bounds
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
@@ -206,70 +201,66 @@ class LocalGPT(nn.Module):
         return idx
 
 # =====================================================================
-# 4. MODEL INITIALIZATION AND LOCAL DEVICE TRAINING
+# 4. INSTANTIATE & INITIAL TRAIN FOR STARTUP
 # =====================================================================
+print("🤖 Compiling neural framework configurations...")
 model = LocalGPT().to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-print("⚡ Starting localized tensor training passes...")
+print("⚡ Running startup optimization passes to converge gradients...")
+model.train()
 for iter in range(max_iters):
     if iter % eval_interval == 0 or iter == max_iters - 1:
         losses = estimate_loss(model)
-        print(f"Iteration: {iter:4d} | Training Loss: {losses['train']:.4f} | Validation Loss: {losses['val']:.4f}")
+        print(f"Step {iter}: Train Loss {losses['train']:.4f}, Val Loss {losses['val']:.4f}")
 
+    # Sample a batch of data
     xb, yb = get_batch('train')
+
+    # Evaluate the loss
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-print("\n🎉 Core model pipeline trained successfully! Deploying server canvas...")
-
 # =====================================================================
-# 5. GRADIO STREAMING LOCAL CHAT USER WEB INTERFACE
+# 5. GRADIO INTERFACE HANDLING & SERVER DEPLOYMENT MATRIX
 # =====================================================================
-def generate_web_response(message, history):
-    # Formulate conversational prompt patterns matching structural templates
-    context_str = f"User: {message}\nJARVIS:"
-
-    # Tokenize input context string using tiktoken encoder
-    encoded_input = enc.encode(context_str)
-    input_tensor = torch.tensor([encoded_input], dtype=torch.long, device=device)
-
-    # Process text tensor generation passes
+def jarvis_response(user_message, history):
+    """Processes incoming chat strings, runs inference, cleans outputs"""
     model.eval()
-    generated_tensor = model.generate(input_tensor, max_new_tokens=45)
-    decoded_output = enc.decode(generated_tensor[0].tolist())
+    
+    # Establish conversational sequence structure
+    prompt = f"\nUser: {user_message}\nJARVIS:"
+    context_tokens = enc.encode(prompt)
+    
+    # Truncate to safely fit the block window context matrix size
+    context_tokens = context_tokens[-block_size:]
+    x = torch.tensor([context_tokens], dtype=torch.long, device=device)
+    
+    # Generate predictive token response vectors
+    generated_indices = model.generate(x, max_new_tokens=40).tolist()[0]
+    full_response = enc.decode(generated_indices)
+    
+    # Try parsing out exclusively the new text generated for JARVIS
+    try:
+        reply = full_response.split("JARVIS:")[-1].split("User:")[0].strip()
+    except Exception:
+        reply = full_response
+        
+    return reply
 
-    # Strip contextual parsing layout anomalies from user views
-    answer = decoded_output.replace(context_str, "")
-    if "User:" in answer:
-        answer = answer.split("User:")[0]
-    answer = answer.strip()
-
-    if not answer:
-        answer = "Awaiting structural telemetry configurations, Sir."
-
-    # Sequential character generation loops to mimic real-time response streams
-    partial_response = ""
-    for char in answer:
-        partial_response += char
-        time.sleep(0.01)
-        yield partial_response
-
-# Compile layout elements
-with gr.Blocks(theme=gr.themes.Default(primary_hue="blue", secondary_hue="slate")) as demo:
-    gr.Markdown("# 🖥️ From-Scratch Local PyTorch GPT Interface")
-    gr.Markdown("An end-to-end custom Transformer running predictions on your device's native hardware processor arrays.")
-    gr.ChatInterface(
-        fn=generate_web_response,
-        textbox=gr.Textbox(placeholder="Talk to your standalone local model...", container=False, scale=7),
-        retry_btn=None,
-        undo_btn=None,
-        clear_btn="Reset History"
-    )
+# Configure Gradio UI layout
+demo = gr.ChatInterface(
+    fn=jarvis_response, 
+    title="JARVIS AI Agent Console",
+    description="Running inference directly on a custom, from-scratch PyTorch GPT Architecture."
+)
 
 if __name__ == "__main__":
-    demo.launch()
+    # Render binds dynamic port allocations to this variable environment key
+    port = int(os.environ.get("PORT", 7860))
+    print(f"🌍 Broadcasting interface channels on Port: {port}...")
+    # Bound to 0.0.0.0 to enable Render's public reverse proxy routing
+    demo.launch(server_name="0.0.0.0", server_port=port)
 
-"""## Model Resources and Configuration"""
